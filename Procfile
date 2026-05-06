@@ -1,1 +1,1 @@
-web: gunicorn app:app --workers 2 --threads 4 --timeout 120 --bind 0.0.0.0:$PORT
+worker: celery -A tasks_dubbing.celery_app worker --loglevel=info --concurrency=1
