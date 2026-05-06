@@ -1,0 +1,3 @@
+# لا حاجة لـ ffmpeg في web - فقط في worker-dubbing
+[phases.setup]
+aptPkgs = []
