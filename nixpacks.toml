@@ -1,2 +1,6 @@
+# nixpacks.toml - مخصص لمستودع الـ Dubbing Worker
 [phases.setup]
 aptPkgs = ["ffmpeg"]
+
+[phases.build]
+cmds = ["pip install -r requirements.txt"]
