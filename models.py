@@ -1,4 +1,4 @@
-# models.pysl-dubbing-tasks-dubbing — V4.0 (Microservices)
+# shared/models.py — Unified V4.0 (Microservices)
 """🗄️ Database models - 3 job types"""
 import uuid
 from datetime import datetime
