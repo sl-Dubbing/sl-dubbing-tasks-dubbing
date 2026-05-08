@@ -10,7 +10,7 @@ from datetime import datetime
 
 from shared import config, r2_client, routing
 from shared.celery_setup import make_celery_app, QUEUE_DUBBING
-from models import db, DubbingJob, CreditTransaction
+from shared.models import db, DubbingJob, CreditTransaction
 
 # إعداد السجلات
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s: %(message)s')
