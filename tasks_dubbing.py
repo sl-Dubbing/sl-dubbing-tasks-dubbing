@@ -101,19 +101,16 @@ def process_dub(self, job_id, user_id, file_key, lang, cost=100, **kwargs):
                 'media_url': media_url, 
                 'lang': lang,
                 'voice_id': kwargs.get('voice_id', 'source'),
-                'engine': kwargs.get('engine', '')
+                'engine': kwargs.get('engine', ''),
+                'return_video': True  # 👈 أمرنا العامل المحلي بدمج الفيديو
             }
             
             # 1. طلب الدبلجة من السيرفر المحلي/السحابي
             data = call_backend(backend_url, payload)
-            audio_url = data.get('audio_url')
-            if not audio_url: raise Exception("Backend did not return audio_url")
             
-            # 2. الدمج مع الفيديو الأصلي (في حالتنا، السيرفر المحلي أرجع رابط الفيديو الجاهز لكنه مسمى audio_url للتوافق)
-            if kwargs.get('return_video', True):
-                final_url = _merge_video_audio_locally(media_url, audio_url)
-            else:
-                final_url = audio_url
+            # العامل المحلي سيقوم بالدمج ويُرجع رابط الفيديو جاهزاً في متغير audio_url
+            final_url = data.get('audio_url') 
+            if not final_url: raise Exception("Backend did not return output URL")
 
             # 3. تحديث قاعدة البيانات (مع تعطيل كود الخصم مؤقتاً لتجنب خطأ Supabase)
             job.status = 'completed'
