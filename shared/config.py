@@ -1,4 +1,4 @@
-# shared/config.py — V2.0 (Triple Backend Support)
+# shared/config.pysl-dubbing-tasks-dubbing — V2.0 (Triple Backend Support)
 """⚙️ مركز الإعدادات + RunPod"""
 import os
 
