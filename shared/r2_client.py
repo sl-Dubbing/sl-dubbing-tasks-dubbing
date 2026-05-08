@@ -35,12 +35,14 @@ def generate_upload_url(user_id, filename, content_type=''):
         file_key = f"uploads/u{user_short}/{uuid.uuid4().hex}.{ext}"
         
         s3 = get_client()
+        
+        # ملاحظة: قمنا بإزالة ContentType من الـ Params لحل مشكلة الـ 403 
+        # هذا يجعل الرابط يقبل الملف بغض النظر عن الـ Header المرسل من المتصفح
         upload_url = s3.generate_presigned_url(
             'put_object',
             Params={
                 'Bucket': config.R2_BUCKET_NAME,
                 'Key': file_key,
-                'ContentType': content_type or 'application/octet-stream',
             },
             ExpiresIn=3600,
         )
