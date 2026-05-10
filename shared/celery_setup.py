@@ -39,4 +39,4 @@ def make_celery_app(name='sl-dubbing-app', task_module=None, queue_name=None):
     return app
 
 # كائن افتراضي للباك-إند
-celery_app = make_celery_app('web-gateway')
+celery_app = make_celery_app('tasks-dubbing', queue_name=QUEUE_DUBBING)
