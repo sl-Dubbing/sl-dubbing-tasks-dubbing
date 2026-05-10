@@ -1,4 +1,4 @@
-# nixpacks.toml - مخصص لمستودع الـ Dubbing Worker
+# nixpacks.toml - Dubbing Worker
 [phases.setup]
 aptPkgs = ["ffmpeg"]
 
