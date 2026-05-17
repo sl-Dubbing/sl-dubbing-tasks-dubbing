@@ -138,11 +138,17 @@ def _webhook_url(job_id: str) -> str:
         os.environ.get('BACKEND_PUBLIC_URL')
         or os.environ.get('PUBLIC_API_URL')
         or os.environ.get('API_BASE_URL')
-        or ''
+        or 'https://api.glotix.ai'
     ).strip().rstrip('/')
     if not base:
+        logger.error(
+            "BACKEND_PUBLIC_URL not set — Modal cannot call /api/dub/webhook; "
+            "jobs stay 'processing' forever. Set BACKEND_PUBLIC_URL=https://api.glotix.ai on worker-dubbing."
+        )
         return ''
-    return f"{base}/api/dub/webhook/{job_id}"
+    url = f"{base}/api/dub/webhook/{job_id}"
+    logger.info("Modal webhook URL for job %s: %s", job_id, url)
+    return url
 
 
 def trigger_modal(payload, timeout=30):
