@@ -121,6 +121,13 @@ def notify_quota_if_needed(user_info: dict, quota: dict):
 # ══════════════════════════════════════════
 # Backend Call (Modal / RunPod)
 # ══════════════════════════════════════════
+def _get_modal_base_url():
+    modal_url = (os.environ.get("MODAL_DUBBING_URL") or "").strip()
+    if not modal_url:
+        raise ValueError("MODAL_DUBBING_URL environment variable is not set")
+    return modal_url.rstrip("/")
+
+
 def call_backend(backend_url, payload, timeout=1500):
     if 'runpod.ai' in backend_url or 'runpod.io' in backend_url:
         headers = {
@@ -144,10 +151,10 @@ def call_backend(backend_url, payload, timeout=1500):
                 raise Exception(f"RunPod failed: {status_data.get('error')}")
             time.sleep(5)
     else:
-        r = requests.post(
-            f"{backend_url.rstrip('/')}/upload-from-url",
-            json=payload, timeout=timeout
-        )
+        modal_base = _get_modal_base_url()
+        upload_url = f"{modal_base}/upload-from-url"
+        logger.info(f"📤 Sending dub job to Modal: {upload_url}")
+        r = requests.post(upload_url, json=payload, timeout=timeout)
         r.raise_for_status()
         return r.json()
 
@@ -172,7 +179,10 @@ def process_dub(self, job_id, user_id, file_key, lang, voice_config=None, return
             if not media_url:
                 raise Exception("Failed to generate media_url from R2")
 
-            backend_url  = routing.get_dubbing_url()
+            backend_url = routing.get_dubbing_url()
+            if 'runpod.ai' not in backend_url and 'runpod.io' not in backend_url:
+                backend_url = _get_modal_base_url()
+
             voice_source = voice_config.get('source', 'original') if voice_config else 'original'
             sample_file  = voice_config.get('file') if voice_config else None
 
