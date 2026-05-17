@@ -6,6 +6,7 @@ import requests
 from datetime import datetime
 from shared import config, r2_client, routing
 from shared.celery_setup import make_celery_app, QUEUE_DUBBING
+from shared.job_events import publish_job_status
 from shared.models import db, DubbingJob
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s: %(message)s')
@@ -128,35 +129,63 @@ def _get_modal_base_url():
     return modal_url.rstrip("/")
 
 
+def _is_runpod(backend_url: str) -> bool:
+    return 'runpod.ai' in backend_url or 'runpod.io' in backend_url
+
+
+def _webhook_url(job_id: str) -> str:
+    base = (
+        os.environ.get('BACKEND_PUBLIC_URL')
+        or os.environ.get('PUBLIC_API_URL')
+        or os.environ.get('API_BASE_URL')
+        or ''
+    ).strip().rstrip('/')
+    if not base:
+        return ''
+    return f"{base}/api/dub/webhook/{job_id}"
+
+
+def trigger_modal(payload, timeout=30):
+    """Fire-and-forget: POST to Modal and return immediately (no output URL expected)."""
+    modal_base = _get_modal_base_url()
+    upload_url = f"{modal_base}/upload-from-url"
+    headers = {'Content-Type': 'application/json'}
+    secret = (os.environ.get('MODAL_TOKEN_SECRET') or '').strip()
+    if secret:
+        headers['Authorization'] = f'Bearer {secret}'
+
+    logger.info(
+        "📤 Triggering Modal dub job: %s (job_id=%s)",
+        upload_url,
+        payload.get('job_id'),
+    )
+    r = requests.post(upload_url, json=payload, headers=headers, timeout=timeout)
+    r.raise_for_status()
+    return r.json()
+
+
 def call_backend(backend_url, payload, timeout=1500):
-    if 'runpod.ai' in backend_url or 'runpod.io' in backend_url:
-        headers = {
-            'Authorization': f'Bearer {config.RUNPOD_API_KEY}',
-            'Content-Type':  'application/json'
-        }
-        r = requests.post(
-            f"{backend_url.rstrip('/')}/run",
-            json={'input': payload}, headers=headers, timeout=60
-        )
-        r.raise_for_status()
-        job_id = r.json().get('id')
-        while True:
-            status_data = requests.get(
-                f"{backend_url.rstrip('/')}/status/{job_id}",
-                headers=headers, timeout=30
-            ).json()
-            if status_data.get('status') == 'COMPLETED':
-                return status_data.get('output')
-            if status_data.get('status') in ['FAILED', 'CANCELLED']:
-                raise Exception(f"RunPod failed: {status_data.get('error')}")
-            time.sleep(5)
-    else:
-        modal_base = _get_modal_base_url()
-        upload_url = f"{modal_base}/upload-from-url"
-        logger.info(f"📤 Sending dub job to Modal: {upload_url}")
-        r = requests.post(upload_url, json=payload, timeout=timeout)
-        r.raise_for_status()
-        return r.json()
+    """Blocking backend call — RunPod polling only."""
+    headers = {
+        'Authorization': f'Bearer {config.RUNPOD_API_KEY}',
+        'Content-Type':  'application/json'
+    }
+    r = requests.post(
+        f"{backend_url.rstrip('/')}/run",
+        json={'input': payload}, headers=headers, timeout=60
+    )
+    r.raise_for_status()
+    runpod_job_id = r.json().get('id')
+    while True:
+        status_data = requests.get(
+            f"{backend_url.rstrip('/')}/status/{runpod_job_id}",
+            headers=headers, timeout=30
+        ).json()
+        if status_data.get('status') == 'COMPLETED':
+            return status_data.get('output')
+        if status_data.get('status') in ['FAILED', 'CANCELLED']:
+            raise Exception(f"RunPod failed: {status_data.get('error')}")
+        time.sleep(5)
 
 
 # ══════════════════════════════════════════
@@ -172,6 +201,7 @@ def process_dub(self, job_id, user_id, file_key, lang, voice_config=None, return
 
         job.status = 'processing'
         db.session.commit()
+        publish_job_status(job_id, {"status": "processing"})
 
         try:
             # 1. Generate download URL from R2
@@ -180,47 +210,63 @@ def process_dub(self, job_id, user_id, file_key, lang, voice_config=None, return
                 raise Exception("Failed to generate media_url from R2")
 
             backend_url = routing.get_dubbing_url()
-            if 'runpod.ai' not in backend_url and 'runpod.io' not in backend_url:
+            if not _is_runpod(backend_url):
                 backend_url = _get_modal_base_url()
 
             voice_source = voice_config.get('source', 'original') if voice_config else 'original'
             sample_file  = voice_config.get('file') if voice_config else None
 
             payload = {
+                'job_id':       job_id,
                 'media_url':    media_url,
                 'lang':         lang,
                 'voice_source': voice_source,
                 'sample_file':  sample_file,
                 'engine':       kwargs.get('engine', 'xtts'),
-                'return_video': return_video
+                'return_video': return_video,
             }
+            callback = _webhook_url(job_id)
+            if callback:
+                payload['webhook_url'] = callback
 
-            # 2. Send to backend
-            data = call_backend(backend_url, payload)
+            # 2. Modal = trigger only; RunPod = blocking poll until done
+            if _is_runpod(backend_url):
+                data = call_backend(backend_url, payload)
+                final_url        = data.get('output_url') or data.get('audio_url') or data.get('video_url')
+                duration_seconds = int(data.get('duration_seconds', 0))
+                if not final_url:
+                    raise Exception("Backend did not return output URL")
 
-            # 3. Extract result
-            final_url        = data.get('output_url') or data.get('audio_url') or data.get('video_url')
-            duration_seconds = int(data.get('duration_seconds', 0))
+                job.status     = 'completed'
+                job.output_url = final_url
+                db.session.commit()
+                publish_job_status(
+                    job_id,
+                    {"status": "completed", "output_url": final_url},
+                )
+                logger.info(f"✅ Job {job_id} completed — {duration_seconds}s")
 
-            if not final_url:
-                raise Exception("Backend did not return output URL")
-
-            # 4. Update database
-            job.status     = 'completed'
-            job.output_url = final_url
-            db.session.commit()
-            logger.info(f"✅ Job {job_id} completed — {duration_seconds}s")
-
-            # 5. تحديث الكوتا + إيميل إذا لزم
-            if duration_seconds > 0 and user_id and user_id != 'default_user':
-                user_info     = get_user_info(user_id)
-                updated_quota = update_dub_usage(user_id, duration_seconds)
-                if user_info and updated_quota:
-                    notify_quota_if_needed(user_info, updated_quota)
+                if duration_seconds > 0 and user_id and user_id != 'default_user':
+                    user_info     = get_user_info(user_id)
+                    updated_quota = update_dub_usage(user_id, duration_seconds)
+                    if user_info and updated_quota:
+                        notify_quota_if_needed(user_info, updated_quota)
+            else:
+                trigger_modal(payload)
+                logger.info(
+                    "⏳ Job %s submitted to Modal — processing (await webhook → Redis → SSE)",
+                    job_id,
+                )
+                return
 
         except Exception as e:
             logger.error(f"❌ Job {job_id} failed: {e}")
             job.status = 'failed'
             job.error  = str(e)
             db.session.commit()
+            if self.request.retries >= self.max_retries:
+                publish_job_status(
+                    job_id,
+                    {"status": "failed", "error": str(e)},
+                )
             raise self.retry(exc=e, countdown=60)
