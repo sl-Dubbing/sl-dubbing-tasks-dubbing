@@ -223,17 +223,20 @@ def process_dub(self, job_id, user_id, file_key, lang, voice_config=None, return
             sample_file  = voice_config.get('file') if voice_config else None
 
             payload = {
-                'job_id':       job_id,
-                'media_url':    media_url,
-                'lang':         lang,
-                'voice_source': voice_source,
-                'sample_file':  sample_file,
-                'engine':       kwargs.get('engine', 'xtts'),
-                'return_video': return_video,
+                'job_id':          job_id,
+                'backend_job_id':  job_id,
+                'client_job_id':   job_id,
+                'media_url':       media_url,
+                'lang':            lang,
+                'voice_source':    voice_source,
+                'sample_file':     sample_file,
+                'engine':          kwargs.get('engine', 'xtts'),
+                'return_video':    return_video,
             }
             callback = _webhook_url(job_id)
             if callback:
                 payload['webhook_url'] = callback
+                payload['callback_url'] = callback
 
             # 2. Modal = trigger only; RunPod = blocking poll until done
             if _is_runpod(backend_url):
@@ -258,10 +261,20 @@ def process_dub(self, job_id, user_id, file_key, lang, voice_config=None, return
                     if user_info and updated_quota:
                         notify_quota_if_needed(user_info, updated_quota)
             else:
-                trigger_modal(payload)
+                from shared.modal_job_map import (
+                    extract_modal_ids_from_response,
+                    link_modal_to_backend,
+                )
+
+                modal_resp = trigger_modal(payload)
+                for modal_id in extract_modal_ids_from_response(modal_resp):
+                    if modal_id != job_id:
+                        link_modal_to_backend(modal_id, job_id)
                 logger.info(
-                    "⏳ Job %s submitted to Modal — processing (await webhook → Redis → SSE)",
+                    "⏳ Job %s submitted to Modal (resp=%s) — await webhook %s",
                     job_id,
+                    modal_resp,
+                    callback or "(none)",
                 )
                 return
 
