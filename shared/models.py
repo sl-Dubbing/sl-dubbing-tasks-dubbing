@@ -1,96 +1,21 @@
-# tasks_dubbing.py — V4.0 (Fixed for Frontend Integration)
-import os
-import time
-import logging
-import requests
+# shared/models.py — Dubbing worker
+"""Database models for dubbing Celery worker."""
+import uuid
 from datetime import datetime
+from flask_sqlalchemy import SQLAlchemy
 
-from shared import config, r2_client, routing
-from shared.celery_setup import make_celery_app, QUEUE_DUBBING
-from shared.models import db, DubbingJob
+db = SQLAlchemy()
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s: %(message)s')
-logger = logging.getLogger(__name__)
 
-celery_app = make_celery_app('tasks-dubbing', queue_name=QUEUE_DUBBING)
+class DubbingJob(db.Model):
+    """Dubbing pipeline job."""
+    __tablename__ = 'dubbing_jobs'
 
-from flask import Flask
-flask_app = Flask(__name__)
-flask_app.config['SQLALCHEMY_DATABASE_URI'] = config.DATABASE_URL.replace('postgres://', 'postgresql://', 1)
-flask_app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-db.init_app(flask_app)
-
-def call_backend(backend_url, payload, timeout=1500):
-    """Call Modal/RunPod backend"""
-    if 'runpod.ai' in backend_url or 'runpod.io' in backend_url:
-        headers = {'Authorization': f'Bearer {config.RUNPOD_API_KEY}', 'Content-Type': 'application/json'}
-        r = requests.post(f"{backend_url.rstrip('/')}/run", json={'input': payload}, headers=headers, timeout=60)
-        r.raise_for_status()
-        job_id = r.json().get('id')
-        while True:
-            status_res = requests.get(f"{backend_url.rstrip('/')}/status/{job_id}", headers=headers, timeout=30)
-            status_data = status_res.json()
-            if status_data.get('status') == 'COMPLETED':
-                return status_data.get('output')
-            if status_data.get('status') in ['FAILED', 'CANCELLED']:
-                raise Exception(f"RunPod failed: {status_data.get('error')}")
-            time.sleep(5)
-    else:
-        # Modal / Local
-        r = requests.post(f"{backend_url.rstrip('/')}/upload-from-url", json=payload, timeout=timeout)
-        r.raise_for_status()
-        return r.json()
-
-@celery_app.task(name='tasks_dubbing.process_dub', bind=True, max_retries=2)
-def process_dub(self, job_id, user_id, file_key, lang, voice_config=None, return_video=True, **kwargs):
-    """Process dubbing job"""
-    with flask_app.app_context():
-        job = DubbingJob.query.get(job_id)
-        if not job: 
-            logger.error(f"Job {job_id} not found")
-            return
-
-        job.status = 'processing'
-        db.session.commit()
-
-        try:
-            # 1. Generate download URL from R2
-            media_url = r2_client.generate_download_url(file_key)
-            if not media_url: 
-                raise Exception("Failed to generate media_url from R2")
-
-            backend_url = routing.get_dubbing_url()
-
-            # 2. Prepare payload with voice_config
-            voice_source = voice_config.get('source', 'original') if voice_config else 'original'
-            sample_file = voice_config.get('file') if voice_config else None
-
-            payload = {
-                'media_url': media_url, 
-                'lang': lang,
-                'voice_source': voice_source,
-                'sample_file': sample_file,
-                'engine': kwargs.get('engine', 'xtts'),
-                'return_video': return_video
-            }
-
-            # 3. Send to backend
-            data = call_backend(backend_url, payload)
-
-            # 4. Extract result URL
-            final_url = data.get('output_url') or data.get('audio_url') or data.get('video_url')
-            if not final_url: 
-                raise Exception("Backend did not return output URL")
-
-            # 5. Update database
-            job.status = 'completed'
-            job.output_url = final_url
-            db.session.commit()
-            logger.info(f"Job {job_id} completed! URL: {final_url}")
-
-        except Exception as e:
-            logger.error(f"Task Failed for Job {job_id}: {e}")
-            job.status = 'failed'
-            job.error = str(e)
-            db.session.commit()
-            raise self.retry(exc=e, countdown=60)
+    id = db.Column(db.String(64), primary_key=True, default=lambda: uuid.uuid4().hex)
+    user_id = db.Column(db.String(128), nullable=False, index=True)
+    language = db.Column(db.String(10), nullable=False)
+    status = db.Column(db.String(20), default='pending', index=True)
+    output_url = db.Column(db.Text)
+    error = db.Column(db.Text)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, index=True)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
