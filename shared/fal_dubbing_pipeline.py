@@ -679,19 +679,18 @@ def _upload_result(final_local: str, job_id: str, out_ext: str, content_type: st
     from shared import r2_client
 
     key = f"results/{job_id}/{uuid.uuid4().hex}.{out_ext}"
-    if r2_client.upload_file_with_key(final_local, key, content_type=content_type):
-        url = r2_client.generate_download_url(key)
-        if url:
-            return url
-    url = r2_client.upload_file(
-        final_local,
-        prefix=f"results/{job_id}",
-        ext=out_ext,
-        content_type=content_type,
-    )
-    if url:
-        return url
-    raise RuntimeError("Could not upload dubbed output to R2")
+    s3 = r2_client.get_client()
+    with open(final_local, "rb") as f:
+        s3.put_object(
+            Bucket=r2_client.config.R2_BUCKET_NAME,
+            Body=f.read(),
+            Key=key,
+            ContentType=content_type,
+        )
+    url = r2_client.generate_download_url(key)
+    if not url:
+        raise RuntimeError("Could not upload dubbed output to R2")
+    return url
 
 
 def run_fal_dubbing_pipeline(
