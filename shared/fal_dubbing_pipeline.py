@@ -27,14 +27,15 @@ logger = logging.getLogger(__name__)
 
 # Fast STT (override with FAL_WHISPER_MODEL=fal-ai/whisper)
 DEFAULT_FAL_WHISPER_MODEL = "fal-ai/wizper"
-DEFAULT_FAL_TTS_PLAYHT = "fal-ai/playht/tts/v3"
 DEFAULT_FAL_TTS_ELEVEN = "fal-ai/elevenlabs/tts/multilingual-v2"
-DEFAULT_FAL_TTS_XTTS = "fal-ai/xtts"
+# MiniMax: multilingual TTS (incl. Arabic) + two-step voice clone
+DEFAULT_FAL_MINIMAX_CLONE = "fal-ai/minimax/voice-clone"
+DEFAULT_FAL_MINIMAX_TTS = "fal-ai/minimax/speech-02-hd"
 
 FAL_PROGRESS_START = 50.0
 FAL_PROGRESS_END = 100.0
 
-# Reference clip for XTTS voice clone (seconds)
+# Reference clip for voice clone (seconds)
 CLONE_SAMPLE_DURATION = float(os.environ.get("FAL_CLONE_SAMPLE_SECONDS", "12"))
 CLONE_SAMPLE_START = float(os.environ.get("FAL_CLONE_SAMPLE_START", "0.5"))
 
@@ -73,7 +74,7 @@ def _voice_source(voice_config: Optional[Dict[str, Any]]) -> str:
 
 def _wants_voice_clone(voice_config: Optional[Dict[str, Any]]) -> bool:
     """
-    True when XTTS (or clone-capable TTS) should use a reference speaker clip.
+    True when MiniMax voice clone should use a reference speaker clip.
 
     Frontend dubbing UI (dubbing.html):
       - voice_mode 'original' → "Voice Clone" — extract speaker from source media
@@ -97,15 +98,14 @@ def _resolve_tts_model(
     voice_clone: bool = False,
 ) -> str:
     """
-    Pick Fal TTS model — mirrors Modal dubbing_factory Stage 5:
-      - voice clone → xtts (like force_engine=xtts when voice_mode=clone)
-      - Arabic non-clone → PlayHT (Modal default force_engine=piper for ar)
+    Pick Fal TTS model:
+      - voice clone → MiniMax speech (after voice-clone step)
+      - Arabic non-clone → MiniMax
       - other langs → ElevenLabs multilingual v2
     """
     if voice_clone:
         return (
-            os.environ.get("FAL_CLONE_TTS_MODEL")
-            or DEFAULT_FAL_TTS_XTTS
+            os.environ.get("FAL_CLONE_TTS_MODEL") or DEFAULT_FAL_MINIMAX_TTS
         ).strip()
 
     explicit = (
@@ -117,15 +117,13 @@ def _resolve_tts_model(
         return explicit
 
     eng = (engine or "").strip().lower()
-    if eng in ("xtts", "clone", "cloned"):
-        return DEFAULT_FAL_TTS_XTTS
-    if eng in ("playht", "piper", "edge"):
-        return DEFAULT_FAL_TTS_PLAYHT
+    if eng in ("xtts", "clone", "cloned", "minimax"):
+        return DEFAULT_FAL_MINIMAX_TTS
     if eng in ("eleven", "elevenlabs"):
         return DEFAULT_FAL_TTS_ELEVEN
 
     if profile.base_lang == "ar":
-        return DEFAULT_FAL_TTS_PLAYHT
+        return DEFAULT_FAL_MINIMAX_TTS
     return DEFAULT_FAL_TTS_ELEVEN
 
 
@@ -518,24 +516,63 @@ def _translate_for_profile(
         return text.strip()
 
 
+_MINIMAX_LANG = {
+    "ar": "Arabic",
+    "en": "English",
+    "es": "Spanish",
+    "fr": "French",
+    "de": "German",
+    "it": "Italian",
+    "pt": "Portuguese",
+    "ru": "Russian",
+    "tr": "Turkish",
+    "zh": "Chinese",
+    "ja": "Japanese",
+    "ko": "Korean",
+    "hi": "Hindi",
+    "nl": "Dutch",
+    "pl": "Polish",
+    "uk": "Ukrainian",
+}
+
+
+def _minimax_language_boost(profile: TargetLangProfile) -> str:
+    return _MINIMAX_LANG.get((profile.base_lang or "").lower(), "auto")
+
+
+def _minimax_clone_voice(reference_url: str, clone_model: str) -> str:
+    """Step 1: clone reference audio → custom_voice_id."""
+    out = _fal_subscribe(clone_model, {"audio_url": reference_url})
+    vid = out.get("custom_voice_id") or out.get("voice_id") or ""
+    if not vid:
+        raise RuntimeError(
+            f"MiniMax clone returned no voice id (keys: {list(out.keys())})"
+        )
+    logger.info("MiniMax clone → custom_voice_id=%s", vid)
+    return vid
+
+
 def _build_tts_arguments(
     model_id: str,
     text: str,
     profile: TargetLangProfile,
     *,
     speaker_reference_url: Optional[str] = None,
+    minimax_voice_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Map text + dialect profile to Fal PlayHT / ElevenLabs / XTTS schemas."""
+    """Map text + dialect profile to Fal MiniMax / ElevenLabs schemas."""
     mid = model_id.lower()
     lang = profile.tts_lang
 
-    if "playht" in mid:
-        voice = (
-            os.environ.get(f"FAL_PLAYHT_VOICE_{profile.lang_code.replace('-', '_').upper()}")
-            or os.environ.get("FAL_PLAYHT_VOICE")
-            or profile.playht_voice
-        ).strip()
-        return {"input": text, "voice": voice}
+    if "minimax" in mid:
+        args: Dict[str, Any] = {"text": text}
+        boost = _minimax_language_boost(profile)
+        if boost:
+            args["language_boost"] = boost
+        voice_id = minimax_voice_id or os.environ.get("FAL_MINIMAX_VOICE")
+        if voice_id:
+            args["voice_setting"] = {"voice_id": voice_id}
+        return args
 
     if "elevenlabs" in mid or "eleven" in mid:
         voice = (
@@ -548,17 +585,6 @@ def _build_tts_arguments(
             "voice": voice,
             "language_code": profile.eleven_language_code,
         }
-
-    if "xtts" in mid:
-        ref = (speaker_reference_url or os.environ.get("FAL_XTTS_SPEAKER_URL") or "").strip()
-        args: Dict[str, Any] = {
-            "prompt": text,
-            "text": text,
-            "language": lang,
-        }
-        if ref:
-            args["audio_url"] = ref
-        return args
 
     return {"text": text, "language": lang, "language_code": profile.eleven_language_code}
 
@@ -765,19 +791,29 @@ def run_fal_dubbing_pipeline(
             raise RuntimeError("Translation produced empty text")
 
         tts_model = _resolve_tts_model(engine, profile=profile, voice_clone=voice_clone)
-        if voice_clone and "xtts" not in tts_model.lower():
-            tts_model = DEFAULT_FAL_TTS_XTTS
-        if voice_clone and not speaker_reference_url:
-            raise RuntimeError("Voice clone requires a speaker reference URL for XTTS")
+
+        minimax_voice_id = None
+        if voice_clone:
+            if not speaker_reference_url:
+                raise RuntimeError("Voice clone requires a speaker reference URL")
+            clone_model = (
+                os.environ.get("FAL_MINIMAX_CLONE_MODEL") or DEFAULT_FAL_MINIMAX_CLONE
+            ).strip()
+            _publish_progress(
+                job_id, "cloning_voice", 0.60, "Cloning speaker voice (MiniMax)"
+            )
+            minimax_voice_id = _minimax_clone_voice(
+                speaker_reference_url, clone_model
+            )
+            if "minimax" not in tts_model.lower():
+                tts_model = DEFAULT_FAL_MINIMAX_TTS
 
         clone_label = " (voice clone)" if voice_clone else ""
-        voice_hint = profile.playht_voice if "playht" in tts_model else profile.eleven_voice
         _publish_progress(
             job_id,
             "synthesizing",
-            0.65,
+            0.68,
             f"TTS {profile.lang_code}{clone_label}",
-            voice=voice_hint,
             dialect=profile.dialect,
         )
         tts_args = _build_tts_arguments(
@@ -785,10 +821,11 @@ def run_fal_dubbing_pipeline(
             translated,
             profile,
             speaker_reference_url=speaker_reference_url,
+            minimax_voice_id=minimax_voice_id,
         )
-        if voice_clone and not tts_args.get("audio_url"):
+        if voice_clone and not minimax_voice_id:
             raise RuntimeError(
-                "XTTS voice clone missing audio_url — reference sample was not attached"
+                "Voice clone enabled but MiniMax returned no voice id"
             )
         tts_out = _fal_subscribe(tts_model, tts_args)
         dubbed_audio_url = _extract_audio_url(tts_out)
