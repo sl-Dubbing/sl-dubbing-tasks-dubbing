@@ -152,22 +152,31 @@ def _webhook_url(job_id: str) -> str:
 
 
 def trigger_modal(payload, timeout=30):
-    """Fire-and-forget: POST to Modal and return immediately (no output URL expected)."""
-    modal_base = _get_modal_base_url()
-    upload_url = f"{modal_base}/upload-from-url"
-    headers = {'Content-Type': 'application/json'}
-    secret = (os.environ.get('MODAL_TOKEN_SECRET') or '').strip()
-    if secret:
-        headers['Authorization'] = f'Bearer {secret}'
+    """Legacy alias — use shared.inference_provider.trigger_dubbing_job."""
+    from shared.inference_provider import trigger_modal_dubbing
+    return trigger_modal_dubbing(payload, timeout=timeout)
 
-    logger.info(
-        "📤 Triggering Modal dub job: %s (job_id=%s)",
-        upload_url,
-        payload.get('job_id'),
+
+def trigger_inference_dubbing(payload, timeout=30):
+    """Route dubbing to Modal or Fal per INFERENCE_PROVIDER (default: modal)."""
+    from shared.inference_provider import (
+        PROVIDER_FAL,
+        PROVIDER_MODAL,
+        get_inference_provider,
+        trigger_fal_dubbing,
+        trigger_modal_dubbing,
     )
-    r = requests.post(upload_url, json=payload, headers=headers, timeout=timeout)
-    r.raise_for_status()
-    return r.json()
+
+    provider = get_inference_provider()
+    job_id = payload.get("job_id")
+
+    if provider == PROVIDER_MODAL:
+        logger.info("📤 INFERENCE_PROVIDER=modal — dub job %s", job_id)
+        return trigger_modal_dubbing(payload, timeout=timeout)
+    if provider == PROVIDER_FAL:
+        logger.info("📤 INFERENCE_PROVIDER=fal — dub job %s", job_id)
+        return trigger_fal_dubbing(payload, timeout=timeout)
+    raise ValueError(f"Unsupported INFERENCE_PROVIDER: {provider!r}")
 
 
 def call_backend(backend_url, payload, timeout=1500):
@@ -215,13 +224,17 @@ def process_dub(self, job_id, user_id, file_key, lang, voice_config=None, return
             if not media_url:
                 raise Exception("Failed to generate media_url from R2")
 
+            from shared.inference_provider import PROVIDER_FAL, get_active_inference_provider
+
+            inference_provider = get_active_inference_provider()
             backend_url = routing.get_dubbing_url()
-            if not _is_runpod(backend_url):
+            if inference_provider != PROVIDER_FAL and not _is_runpod(backend_url):
                 backend_url = _get_modal_base_url()
 
             voice_source = voice_config.get('source', 'original') if voice_config else 'original'
             sample_file  = voice_config.get('file') if voice_config else None
 
+            source_language = (kwargs.get('source_language') or '').strip()
             payload = {
                 'job_id':          job_id,
                 'backend_job_id':  job_id,
@@ -233,12 +246,14 @@ def process_dub(self, job_id, user_id, file_key, lang, voice_config=None, return
                 'engine':          kwargs.get('engine', 'xtts'),
                 'return_video':    return_video,
             }
+            if source_language:
+                payload['source_language'] = source_language
             callback = _webhook_url(job_id)
             if callback:
                 payload['webhook_url'] = callback
                 payload['callback_url'] = callback
 
-            # 2. Modal = trigger only; RunPod = blocking poll until done
+            # 2. RunPod = blocking poll; Modal/Fal = async trigger + webhook
             if _is_runpod(backend_url):
                 data = call_backend(backend_url, payload)
                 final_url        = data.get('output_url') or data.get('audio_url') or data.get('video_url')
@@ -266,14 +281,15 @@ def process_dub(self, job_id, user_id, file_key, lang, voice_config=None, return
                     link_modal_to_backend,
                 )
 
-                modal_resp = trigger_modal(payload)
-                for modal_id in extract_modal_ids_from_response(modal_resp):
-                    if modal_id != job_id:
-                        link_modal_to_backend(modal_id, job_id)
+                inf_resp = trigger_inference_dubbing(payload)
+                for ext_id in extract_modal_ids_from_response(inf_resp):
+                    if ext_id != job_id:
+                        link_modal_to_backend(ext_id, job_id)
                 logger.info(
-                    "⏳ Job %s submitted to Modal (resp=%s) — await webhook %s",
+                    "⏳ Job %s submitted via %s (resp=%s) — await webhook %s",
                     job_id,
-                    modal_resp,
+                    inference_provider,
+                    inf_resp,
                     callback or "(none)",
                 )
                 return
