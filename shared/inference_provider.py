@@ -331,7 +331,10 @@ def trigger_tts_inference(
 
 def inference_status_summary() -> Dict[str, Any]:
     """Safe status blob for /health and /api/status (no secrets)."""
+    from shared.fal_dubbing_pipeline import is_fal_pipeline_configured
+
     provider = get_active_inference_provider()
+    fal_ready = is_fal_pipeline_configured()
     summary: Dict[str, Any] = {
         "inference_provider": provider,
         "active_inference_provider": provider,
@@ -339,16 +342,16 @@ def inference_status_summary() -> Dict[str, Any]:
         "fal_key_configured": bool(
             (os.environ.get("FAL_KEY") or os.environ.get("FAL_API_KEY") or "").strip()
         ),
-        "fal_dubbing_endpoint_configured": bool(
-            (os.environ.get("FAL_DUBBING_ENDPOINT") or "").strip()
+        # Dual-engine Fal pipeline uses per-stage models (Whisper + TTS), not only FAL_DUBBING_ENDPOINT
+        "fal_dubbing_endpoint_configured": fal_ready,
+        "fal_ready": fal_ready,
+        "fal_whisper_model": os.environ.get("FAL_WHISPER_MODEL") or "fal-ai/whisper",
+        "fal_tts_model": (
+            os.environ.get("FAL_TTS_MODEL")
+            or os.environ.get("FAL_TTS_ENDPOINT")
+            or "fal-ai/elevenlabs/tts/multilingual-v2"
         ),
     }
-    if provider == PROVIDER_FAL:
-        try:
-            get_fal_key()
-            summary["fal_ready"] = bool((os.environ.get("FAL_DUBBING_ENDPOINT") or "").strip())
-        except InferenceProviderError:
-            summary["fal_ready"] = False
-    else:
+    if provider == PROVIDER_MODAL:
         summary["modal_ready"] = summary["modal_dubbing_configured"]
     return summary
