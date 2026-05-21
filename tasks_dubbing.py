@@ -224,75 +224,98 @@ def process_dub(self, job_id, user_id, file_key, lang, voice_config=None, return
             if not media_url:
                 raise Exception("Failed to generate media_url from R2")
 
-            from shared.inference_provider import PROVIDER_FAL, get_active_inference_provider
+            from shared.inference_provider import (
+                PROVIDER_FAL,
+                PROVIDER_MODAL,
+                get_inference_provider,
+                trigger_modal_dubbing,
+            )
 
-            inference_provider = get_active_inference_provider()
-            backend_url = routing.get_dubbing_url()
-            if inference_provider != PROVIDER_FAL and not _is_runpod(backend_url):
-                backend_url = _get_modal_base_url()
-
+            inference_provider = get_inference_provider()
             voice_source = voice_config.get('source', 'original') if voice_config else 'original'
             sample_file  = voice_config.get('file') if voice_config else None
-
             source_language = (kwargs.get('source_language') or '').strip()
-            payload = {
-                'job_id':          job_id,
-                'backend_job_id':  job_id,
-                'client_job_id':   job_id,
-                'media_url':       media_url,
-                'lang':            lang,
-                'voice_source':    voice_source,
-                'sample_file':     sample_file,
-                'engine':          kwargs.get('engine', 'xtts'),
-                'return_video':    return_video,
-            }
-            if source_language:
-                payload['source_language'] = source_language
-            callback = _webhook_url(job_id)
-            if callback:
-                payload['webhook_url'] = callback
-                payload['callback_url'] = callback
 
-            # 2. RunPod = blocking poll; Modal/Fal = async trigger + webhook
-            if _is_runpod(backend_url):
-                data = call_backend(backend_url, payload)
-                final_url        = data.get('output_url') or data.get('audio_url') or data.get('video_url')
-                duration_seconds = int(data.get('duration_seconds', 0))
-                if not final_url:
-                    raise Exception("Backend did not return output URL")
+            # ── Fal dual-engine: full pipeline in worker (SSE progress + DB like Modal) ──
+            if inference_provider == PROVIDER_FAL:
+                from shared.fal_dubbing_pipeline import run_fal_dubbing_pipeline
 
-                job.status     = 'completed'
-                job.output_url = final_url
-                db.session.commit()
-                publish_job_status(
-                    job_id,
-                    {"status": "completed", "output_url": final_url},
-                )
-                logger.info(f"✅ Job {job_id} completed — {duration_seconds}s")
-
-                if duration_seconds > 0 and user_id and user_id != 'default_user':
-                    user_info     = get_user_info(user_id)
-                    updated_quota = update_dub_usage(user_id, duration_seconds)
-                    if user_info and updated_quota:
-                        notify_quota_if_needed(user_info, updated_quota)
-            else:
-                from shared.modal_job_map import (
-                    extract_modal_ids_from_response,
-                    link_modal_to_backend,
-                )
-
-                inf_resp = trigger_inference_dubbing(payload)
-                for ext_id in extract_modal_ids_from_response(inf_resp):
-                    if ext_id != job_id:
-                        link_modal_to_backend(ext_id, job_id)
-                logger.info(
-                    "⏳ Job %s submitted via %s (resp=%s) — await webhook %s",
-                    job_id,
-                    inference_provider,
-                    inf_resp,
-                    callback or "(none)",
+                logger.info("📤 INFERENCE_PROVIDER=fal — running Fal dubbing pipeline %s", job_id)
+                run_fal_dubbing_pipeline(
+                    job_id=job_id,
+                    user_id=user_id,
+                    media_url=media_url,
+                    target_lang=lang,
+                    source_language=source_language,
+                    return_video=return_video,
+                    engine=kwargs.get('engine', ''),
                 )
                 return
+
+            # ── Modal dual-engine: unchanged async trigger + webhook ──
+            if inference_provider == PROVIDER_MODAL:
+                backend_url = routing.get_dubbing_url()
+                if not _is_runpod(backend_url):
+                    backend_url = _get_modal_base_url()
+
+                payload = {
+                    'job_id':          job_id,
+                    'backend_job_id':  job_id,
+                    'client_job_id':   job_id,
+                    'media_url':       media_url,
+                    'lang':            lang,
+                    'voice_source':    voice_source,
+                    'sample_file':     sample_file,
+                    'engine':          kwargs.get('engine', 'xtts'),
+                    'return_video':    return_video,
+                }
+                if source_language:
+                    payload['source_language'] = source_language
+                callback = _webhook_url(job_id)
+                if callback:
+                    payload['webhook_url'] = callback
+                    payload['callback_url'] = callback
+
+                if _is_runpod(backend_url):
+                    data = call_backend(backend_url, payload)
+                    final_url        = data.get('output_url') or data.get('audio_url') or data.get('video_url')
+                    duration_seconds = int(data.get('duration_seconds', 0))
+                    if not final_url:
+                        raise Exception("Backend did not return output URL")
+
+                    job.status     = 'completed'
+                    job.output_url = final_url
+                    db.session.commit()
+                    publish_job_status(
+                        job_id,
+                        {"status": "completed", "output_url": final_url},
+                    )
+                    logger.info(f"✅ Job {job_id} completed — {duration_seconds}s")
+
+                    if duration_seconds > 0 and user_id and user_id != 'default_user':
+                        user_info     = get_user_info(user_id)
+                        updated_quota = update_dub_usage(user_id, duration_seconds)
+                        if user_info and updated_quota:
+                            notify_quota_if_needed(user_info, updated_quota)
+                else:
+                    from shared.modal_job_map import (
+                        extract_modal_ids_from_response,
+                        link_modal_to_backend,
+                    )
+
+                    modal_resp = trigger_modal_dubbing(payload)
+                    for ext_id in extract_modal_ids_from_response(modal_resp):
+                        if ext_id != job_id:
+                            link_modal_to_backend(ext_id, job_id)
+                    logger.info(
+                        "⏳ Job %s submitted to Modal (resp=%s) — await webhook %s",
+                        job_id,
+                        modal_resp,
+                        callback or "(none)",
+                    )
+                return
+
+            raise ValueError(f"Unsupported INFERENCE_PROVIDER: {inference_provider!r}")
 
         except Exception as e:
             logger.error(f"❌ Job {job_id} failed: {e}")
