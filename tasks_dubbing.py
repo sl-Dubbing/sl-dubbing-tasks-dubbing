@@ -241,6 +241,7 @@ def process_dub(self, job_id, user_id, file_key, lang, voice_config=None, return
                 from shared.fal_dubbing_pipeline import run_fal_dubbing_pipeline
 
                 logger.info("📤 INFERENCE_PROVIDER=fal — running Fal dubbing pipeline %s", job_id)
+                vc = voice_config or {}
                 run_fal_dubbing_pipeline(
                     job_id=job_id,
                     user_id=user_id,
@@ -248,7 +249,9 @@ def process_dub(self, job_id, user_id, file_key, lang, voice_config=None, return
                     target_lang=lang,
                     source_language=source_language,
                     return_video=return_video,
-                    engine=kwargs.get('engine', ''),
+                    engine=kwargs.get('engine', '') or vc.get('engine', ''),
+                    voice_config=vc,
+                    dialect=vc.get('dialect', ''),
                 )
                 return
 
