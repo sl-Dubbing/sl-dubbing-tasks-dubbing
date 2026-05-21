@@ -36,7 +36,8 @@ FAL_PROGRESS_START = 50.0
 FAL_PROGRESS_END = 100.0
 
 # Reference clip for voice clone (seconds)
-CLONE_SAMPLE_DURATION = float(os.environ.get("FAL_CLONE_SAMPLE_SECONDS", "12"))
+CLONE_SAMPLE_DURATION = float(os.environ.get("FAL_CLONE_SAMPLE_SECONDS", "14"))
+MINIMAX_MIN_CLONE_SECONDS = 11.0  # هامش أمان فوق حد MiniMax (10s)
 CLONE_SAMPLE_START = float(os.environ.get("FAL_CLONE_SAMPLE_START", "0.5"))
 
 
