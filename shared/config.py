@@ -36,6 +36,15 @@ RUNPOD_STT_URL = os.environ.get('RUNPOD_STT_URL', '')
 LOCAL_PROCESSING_URL = os.environ.get('LOCAL_PROCESSING_URL', '')
 
 PROCESSING_BACKEND = os.environ.get('PROCESSING_BACKEND', 'auto').lower()
+INFERENCE_PROVIDER = (os.environ.get('INFERENCE_PROVIDER') or 'modal').strip().lower()
+ACTIVE_INFERENCE_PROVIDER = (
+    os.environ.get('ACTIVE_INFERENCE_PROVIDER')
+    or INFERENCE_PROVIDER
+).strip().lower()
+MODAL_TOKEN_SECRET = os.environ.get('MODAL_TOKEN_SECRET', '')
+FAL_KEY = (os.environ.get('FAL_KEY') or os.environ.get('FAL_API_KEY') or '').strip()
+FAL_DUBBING_ENDPOINT = os.environ.get('FAL_DUBBING_ENDPOINT', '').strip()
+FAL_TTS_ENDPOINT = os.environ.get('FAL_TTS_ENDPOINT', '').strip()
 
 # Pricing & Credits
 WELCOME_CREDITS = int(os.environ.get('WELCOME_CREDITS', '1000'))

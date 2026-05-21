@@ -45,7 +45,10 @@ def extract_modal_ids_from_response(data: Any) -> list[str]:
     if not isinstance(data, dict):
         return []
     ids: list[str] = []
-    for k in ("job_id", "id", "call_id", "modal_job_id", "run_id", "task_id"):
+    for k in (
+        "job_id", "id", "call_id", "modal_job_id", "run_id", "task_id",
+        "request_id", "gateway_request_id",
+    ):
         v = data.get(k)
         if v is not None and str(v).strip():
             ids.append(str(v).strip())
