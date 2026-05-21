@@ -18,6 +18,7 @@ from typing import Any, Dict, Optional
 
 import requests
 
+from shared.fal_lang_profiles import TargetLangProfile, resolve_target_language_profile
 from shared.inference_provider import InferenceProviderError, _import_fal_client
 from shared.job_events import publish_job_status
 from shared.models import DubbingJob, db
@@ -32,6 +33,10 @@ DEFAULT_FAL_TTS_XTTS = "fal-ai/xtts"
 
 FAL_PROGRESS_START = 50.0
 FAL_PROGRESS_END = 100.0
+
+# Reference clip for XTTS voice clone (seconds)
+CLONE_SAMPLE_DURATION = float(os.environ.get("FAL_CLONE_SAMPLE_SECONDS", "12"))
+CLONE_SAMPLE_START = float(os.environ.get("FAL_CLONE_SAMPLE_START", "0.5"))
 
 
 def is_fal_pipeline_configured() -> bool:
@@ -50,8 +55,59 @@ def _fal_whisper_model() -> str:
     return (os.environ.get("FAL_WHISPER_MODEL") or DEFAULT_FAL_WHISPER_MODEL).strip()
 
 
-def _resolve_tts_model(engine: str) -> str:
-    """Pick TTS endpoint from engine hint or env."""
+def _voice_config_dict(voice_config: Any) -> Dict[str, Any]:
+    if isinstance(voice_config, dict):
+        return voice_config
+    return {}
+
+
+def _voice_source(voice_config: Optional[Dict[str, Any]]) -> str:
+    cfg = _voice_config_dict(voice_config)
+    return (
+        cfg.get("source")
+        or cfg.get("voice_mode")
+        or cfg.get("voice_source")
+        or ""
+    ).strip().lower()
+
+
+def _wants_voice_clone(voice_config: Optional[Dict[str, Any]]) -> bool:
+    """
+    True when XTTS (or clone-capable TTS) should use a reference speaker clip.
+
+    Frontend dubbing UI (dubbing.html):
+      - voice_mode 'original' → "Voice Clone" — extract speaker from source media
+      - voice_mode 'clone'    → premium Supabase voice (sample_file URL)
+    """
+    cfg = _voice_config_dict(voice_config)
+    src = _voice_source(cfg)
+    if src == "original":
+        return True
+    if src in ("clone", "cloned", "voice_clone"):
+        return bool(_resolve_external_speaker_url(cfg))
+    if cfg.get("voice_clone") or cfg.get("clone_voice"):
+        return True
+    return False
+
+
+def _resolve_tts_model(
+    engine: str,
+    *,
+    profile: TargetLangProfile,
+    voice_clone: bool = False,
+) -> str:
+    """
+    Pick Fal TTS model — mirrors Modal dubbing_factory Stage 5:
+      - voice clone → xtts (like force_engine=xtts when voice_mode=clone)
+      - Arabic non-clone → PlayHT (Modal default force_engine=piper for ar)
+      - other langs → ElevenLabs multilingual v2
+    """
+    if voice_clone:
+        return (
+            os.environ.get("FAL_CLONE_TTS_MODEL")
+            or DEFAULT_FAL_TTS_XTTS
+        ).strip()
+
     explicit = (
         os.environ.get("FAL_TTS_MODEL")
         or os.environ.get("FAL_TTS_ENDPOINT")
@@ -64,6 +120,11 @@ def _resolve_tts_model(engine: str) -> str:
     if eng in ("xtts", "clone", "cloned"):
         return DEFAULT_FAL_TTS_XTTS
     if eng in ("playht", "piper", "edge"):
+        return DEFAULT_FAL_TTS_PLAYHT
+    if eng in ("eleven", "elevenlabs"):
+        return DEFAULT_FAL_TTS_ELEVEN
+
+    if profile.base_lang == "ar":
         return DEFAULT_FAL_TTS_PLAYHT
     return DEFAULT_FAL_TTS_ELEVEN
 
@@ -222,6 +283,109 @@ def _download_media(url: str, dest_path: str, timeout: int = 300) -> None:
                     f.write(chunk)
 
 
+def _extract_voice_clone_sample(
+    media_path: str,
+    out_path: str,
+    *,
+    start_sec: float = CLONE_SAMPLE_START,
+    duration_sec: float = CLONE_SAMPLE_DURATION,
+) -> bool:
+    """
+    Extract a short, clean mono WAV from the source media for XTTS reference.
+    Skips a brief lead-in, normalizes level, and band-limits speech frequencies.
+    """
+    total = _probe_duration_seconds(media_path)
+    if total <= 0:
+        total = duration_sec + start_sec + 1.0
+    start = max(0.0, min(start_sec, max(0.0, total - 1.0)))
+    clip_len = min(duration_sec, max(1.0, total - start))
+
+    try:
+        subprocess.run(
+            [
+                "ffmpeg", "-y",
+                "-ss", f"{start:.3f}",
+                "-t", f"{clip_len:.3f}",
+                "-i", media_path,
+                "-vn",
+                "-af", "highpass=f=80,lowpass=f=8000,loudnorm=I=-16:TP=-1.5:LRA=11",
+                "-ar", "22050",
+                "-ac", "1",
+                out_path,
+            ],
+            check=True,
+            capture_output=True,
+        )
+        ok = os.path.isfile(out_path) and os.path.getsize(out_path) > 0
+        if ok:
+            logger.info(
+                "Voice clone sample: %.1fs from t=%.1fs (media %.1fs)",
+                clip_len,
+                start,
+                total,
+            )
+        return ok
+    except (FileNotFoundError, subprocess.CalledProcessError) as exc:
+        logger.warning("Voice clone sample extract failed: %s", exc)
+        return False
+
+
+def _resolve_external_speaker_url(voice_config: Dict[str, Any]) -> Optional[str]:
+    """Premium clone: use sample URL/file from voice_config if provided."""
+    for key in ("sample_url", "sample_file", "file", "speaker_url"):
+        val = (voice_config.get(key) or "").strip()
+        if not val:
+            continue
+        if val.startswith("http://") or val.startswith("https://"):
+            return val
+        try:
+            from shared import r2_client
+
+            url = r2_client.generate_download_url(val)
+            if url:
+                return url
+        except Exception as exc:
+            logger.warning("Could not resolve sample key %s: %s", val[:80], exc)
+    return None
+
+
+def _prepare_speaker_reference_url(
+    *,
+    job_id: str,
+    local_media_path: str,
+    voice_config: Optional[Dict[str, Any]],
+    tmp_dir: str,
+) -> Optional[str]:
+    """
+    Build a public URL for XTTS reference audio: external sample or ffmpeg clip.
+    Caller must delete tmp_dir (or individual files) when done.
+    """
+    cfg = _voice_config_dict(voice_config)
+    external = _resolve_external_speaker_url(cfg)
+    if external:
+        logger.info("[%s] Using external speaker sample URL", job_id)
+        return external
+
+    src = _voice_source(cfg)
+    if src not in ("original", "clone", "cloned", "voice_clone") and not (
+        cfg.get("voice_clone") or cfg.get("clone_voice")
+    ):
+        return None
+
+    sample_path = os.path.join(tmp_dir, "voice_clone_ref.wav")
+    if not _extract_voice_clone_sample(local_media_path, sample_path):
+        raise RuntimeError(
+            "Voice clone requested but ffmpeg could not extract a reference sample "
+            "(install ffmpeg/ffprobe on the worker)"
+        )
+
+    ref_url = _upload_temp_to_r2(sample_path, job_id, "wav", "audio/wav")
+    if not ref_url:
+        raise RuntimeError("Voice clone reference upload to R2 failed")
+    logger.info("[%s] Uploaded voice clone reference for XTTS", job_id)
+    return ref_url
+
+
 def _extract_audio_wav(video_path: str, wav_path: str) -> bool:
     try:
         subprocess.run(
@@ -314,41 +478,89 @@ def _base_lang(code: str) -> str:
     return code.split("-")[0].split("_")[0].lower()
 
 
-def _translate_text(text: str, src: str, tgt: str) -> str:
+def _translate_for_profile(
+    text: str,
+    src_lang: str,
+    profile: TargetLangProfile,
+) -> str:
+    """
+    Translate transcript toward target profile.
+
+    Modal uses Claude + dialect for Arabic; Fal worker uses Google Translate to
+    base_lang with dialect logged (regional flavor is primarily via TTS voice mapping).
+    """
     if not text or not str(text).strip():
         return ""
-    s, t = _base_lang(src), _base_lang(tgt)
-    if s == t:
+    src = _base_lang(src_lang)
+    tgt = profile.base_lang
+    if src == tgt and not profile.dialect:
         return text.strip()
     try:
         from deep_translator import GoogleTranslator
 
-        return GoogleTranslator(source=s, target=t).translate(text.strip())
+        out = GoogleTranslator(source=src, target=tgt).translate(text.strip())
+        if profile.dialect and profile.base_lang == "ar":
+            logger.info(
+                "Arabic translation via Google (base=%s, dialect=%s, code=%s)",
+                tgt,
+                profile.dialect,
+                profile.lang_code,
+            )
+        return out
     except Exception as exc:
-        logger.warning("Translation failed (%s→%s): %s", s, t, exc)
+        logger.warning(
+            "Translation failed (%s→%s, dialect=%s): %s",
+            src,
+            profile.lang_code,
+            profile.dialect,
+            exc,
+        )
         return text.strip()
 
 
-def _build_tts_arguments(model_id: str, text: str, target_lang: str) -> Dict[str, Any]:
-    """Map text/lang to the input schema each Fal TTS model expects."""
-    lang = _base_lang(target_lang)
+def _build_tts_arguments(
+    model_id: str,
+    text: str,
+    profile: TargetLangProfile,
+    *,
+    speaker_reference_url: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Map text + dialect profile to Fal PlayHT / ElevenLabs / XTTS schemas."""
     mid = model_id.lower()
+    lang = profile.tts_lang
 
     if "playht" in mid:
         voice = (
-            os.environ.get("FAL_PLAYHT_VOICE")
-            or "Dexter (English (US)/American)"
+            os.environ.get(f"FAL_PLAYHT_VOICE_{profile.lang_code.replace('-', '_').upper()}")
+            or os.environ.get("FAL_PLAYHT_VOICE")
+            or profile.playht_voice
         ).strip()
         return {"input": text, "voice": voice}
 
+    if "elevenlabs" in mid or "eleven" in mid:
+        voice = (
+            os.environ.get(f"FAL_ELEVEN_VOICE_{profile.lang_code.replace('-', '_').upper()}")
+            or os.environ.get("FAL_ELEVEN_VOICE")
+            or profile.eleven_voice
+        ).strip()
+        return {
+            "text": text,
+            "voice": voice,
+            "language_code": profile.eleven_language_code,
+        }
+
     if "xtts" in mid:
-        args: Dict[str, Any] = {"text": text, "language": lang}
-        speaker = (os.environ.get("FAL_XTTS_SPEAKER_URL") or "").strip()
-        if speaker:
-            args["speaker_url"] = speaker
+        ref = (speaker_reference_url or os.environ.get("FAL_XTTS_SPEAKER_URL") or "").strip()
+        args: Dict[str, Any] = {
+            "prompt": text,
+            "text": text,
+            "language": lang,
+        }
+        if ref:
+            args["audio_url"] = ref
         return args
 
-    return {"text": text, "language": lang}
+    return {"text": text, "language": lang, "language_code": profile.eleven_language_code}
 
 
 def _merge_audio_video(video_path: str, audio_path: str, out_path: str) -> bool:
@@ -440,6 +652,8 @@ def run_fal_dubbing_pipeline(
     source_language: str,
     return_video: bool,
     engine: str,
+    voice_config: Optional[Dict[str, Any]] = None,
+    dialect: str = "",
 ) -> Dict[str, Any]:
     """
     Full Fal dubbing pipeline (blocking).
@@ -462,12 +676,45 @@ def run_fal_dubbing_pipeline(
 
     tmp = tempfile.mkdtemp(prefix=f"fal_dub_{job_id}_")
     duration_seconds = 0
+    voice_cfg = _voice_config_dict(voice_config)
+    dialect_from_cfg = (voice_cfg.get("dialect") or dialect or "").strip()
+    profile = resolve_target_language_profile(target_lang, dialect_from_cfg)
+    voice_clone = _wants_voice_clone(voice_cfg)
+    speaker_reference_url: Optional[str] = None
+
+    logger.info(
+        "[%s] Fal profile: code=%s base=%s dialect=%s edge=%s playht=%s eleven=%s clone=%s",
+        job_id,
+        profile.lang_code,
+        profile.base_lang,
+        profile.dialect or "(none)",
+        profile.edge_voice,
+        profile.playht_voice,
+        profile.eleven_voice,
+        voice_clone,
+    )
 
     try:
         _publish_progress(job_id, "preparing", 0.05, "Downloading media")
 
         local_in = os.path.join(tmp, "input.bin")
         _download_media(media_url, local_in)
+
+        if voice_clone:
+            _publish_progress(
+                job_id,
+                "voice_sample",
+                0.12,
+                "Extracting speaker reference",
+            )
+            speaker_reference_url = _prepare_speaker_reference_url(
+                job_id=job_id,
+                local_media_path=local_in,
+                voice_config=voice_cfg,
+                tmp_dir=tmp,
+            )
+            if not speaker_reference_url:
+                raise RuntimeError("Voice clone enabled but no speaker reference URL")
 
         is_video = bool(return_video) and _probe_is_video(local_in)
         audio_url_for_stt = media_url
@@ -503,26 +750,46 @@ def run_fal_dubbing_pipeline(
             raise RuntimeError("Fal STT returned an empty transcript")
 
         detected = whisper_out.get("language") or _base_lang(source_language or "en")
+        dialect_label = profile.dialect or profile.display_name or profile.lang_code
         _publish_progress(
             job_id,
             "translating",
             0.45,
-            f"Translating to {target_lang}",
+            f"Translating ({dialect_label})",
             source=detected,
-            target=target_lang,
+            target=profile.lang_code,
+            dialect=profile.dialect,
         )
-        translated = _translate_text(transcript, detected, target_lang)
+        translated = _translate_for_profile(transcript, detected, profile)
         if not translated:
             raise RuntimeError("Translation produced empty text")
 
-        tts_model = _resolve_tts_model(engine)
+        tts_model = _resolve_tts_model(engine, profile=profile, voice_clone=voice_clone)
+        if voice_clone and "xtts" not in tts_model.lower():
+            tts_model = DEFAULT_FAL_TTS_XTTS
+        if voice_clone and not speaker_reference_url:
+            raise RuntimeError("Voice clone requires a speaker reference URL for XTTS")
+
+        clone_label = " (voice clone)" if voice_clone else ""
+        voice_hint = profile.playht_voice if "playht" in tts_model else profile.eleven_voice
         _publish_progress(
             job_id,
             "synthesizing",
             0.65,
-            f"TTS ({tts_model.split('/')[-1]})",
+            f"TTS {profile.lang_code}{clone_label}",
+            voice=voice_hint,
+            dialect=profile.dialect,
         )
-        tts_args = _build_tts_arguments(tts_model, translated, target_lang)
+        tts_args = _build_tts_arguments(
+            tts_model,
+            translated,
+            profile,
+            speaker_reference_url=speaker_reference_url,
+        )
+        if voice_clone and not tts_args.get("audio_url"):
+            raise RuntimeError(
+                "XTTS voice clone missing audio_url — reference sample was not attached"
+            )
         tts_out = _fal_subscribe(tts_model, tts_args)
         dubbed_audio_url = _extract_audio_url(tts_out)
         if not dubbed_audio_url:
