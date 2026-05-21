@@ -37,8 +37,8 @@ FAL_PROGRESS_END = 100.0
 
 # Reference clip for voice clone (seconds)
 CLONE_SAMPLE_DURATION = float(os.environ.get("FAL_CLONE_SAMPLE_SECONDS", "14"))
-MINIMAX_MIN_CLONE_SECONDS = 11.0  # هامش أمان فوق حد MiniMax (10s)
 CLONE_SAMPLE_START = float(os.environ.get("FAL_CLONE_SAMPLE_START", "0.5"))
+MINIMAX_MIN_CLONE_SECONDS = 11.0  # safety margin above MiniMax 10s minimum
 
 
 def is_fal_pipeline_configured() -> bool:
@@ -316,14 +316,37 @@ def _extract_voice_clone_sample(
             capture_output=True,
         )
         ok = os.path.isfile(out_path) and os.path.getsize(out_path) > 0
-        if ok:
-            logger.info(
-                "Voice clone sample: %.1fs from t=%.1fs (media %.1fs)",
-                clip_len,
-                start,
-                total,
-            )
-        return ok
+        if not ok:
+            return False
+
+        # MiniMax rejects clips under 10s — loop-extend when needed
+        actual = _probe_duration_seconds(out_path)
+        if actual < MINIMAX_MIN_CLONE_SECONDS:
+            loops = int(MINIMAX_MIN_CLONE_SECONDS // max(actual, 0.5)) + 1
+            looped = out_path + ".looped.wav"
+            try:
+                subprocess.run(
+                    [
+                        "ffmpeg", "-y", "-stream_loop", str(loops), "-i", out_path,
+                        "-t", f"{MINIMAX_MIN_CLONE_SECONDS + 1.0:.3f}",
+                        "-ar", "22050", "-ac", "1", looped,
+                    ],
+                    check=True,
+                    capture_output=True,
+                )
+                if os.path.isfile(looped) and os.path.getsize(looped) > 0:
+                    shutil.move(looped, out_path)
+                    logger.info(
+                        "Clone sample looped %dx: %.1fs → %.1fs",
+                        loops,
+                        actual,
+                        _probe_duration_seconds(out_path),
+                    )
+            except (FileNotFoundError, subprocess.CalledProcessError) as exc:
+                logger.warning("Clone sample loop-extend failed: %s", exc)
+
+        logger.info("Voice clone sample ready: %.1fs", _probe_duration_seconds(out_path))
+        return True
     except (FileNotFoundError, subprocess.CalledProcessError) as exc:
         logger.warning("Voice clone sample extract failed: %s", exc)
         return False
