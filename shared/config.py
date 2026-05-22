@@ -42,9 +42,6 @@ ACTIVE_INFERENCE_PROVIDER = (
     or INFERENCE_PROVIDER
 ).strip().lower()
 MODAL_TOKEN_SECRET = os.environ.get('MODAL_TOKEN_SECRET', '')
-FAL_KEY = (os.environ.get('FAL_KEY') or os.environ.get('FAL_API_KEY') or '').strip()
-FAL_DUBBING_ENDPOINT = os.environ.get('FAL_DUBBING_ENDPOINT', '').strip()
-FAL_TTS_ENDPOINT = os.environ.get('FAL_TTS_ENDPOINT', '').strip()
 
 # Pricing & Credits
 WELCOME_CREDITS = int(os.environ.get('WELCOME_CREDITS', '1000'))
