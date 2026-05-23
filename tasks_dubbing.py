@@ -1,4 +1,4 @@
-# tasks_dubbing.py — V5.0 (With Quota Check & Email Notifications)
+# tasks_dubbing.py — V5.1 Production (Strict No-Retry / Anti-Drain Patch)
 import os
 import time
 import logging
@@ -25,7 +25,7 @@ db.init_app(flask_app)
 # ══════════════════════════════════════════
 def _supa_headers():
     return {
-        "apikey":        os.environ.get('SUPABASE_SERVICE_KEY', ''),
+        "apikey":         os.environ.get('SUPABASE_SERVICE_KEY', ''),
         "Authorization": f"Bearer {os.environ.get('SUPABASE_SERVICE_KEY', '')}",
         "Content-Type":  "application/json"
     }
@@ -141,10 +141,7 @@ def _webhook_url(job_id: str) -> str:
         or 'https://api.glotix.ai'
     ).strip().rstrip('/')
     if not base:
-        logger.error(
-            "BACKEND_PUBLIC_URL not set — Modal cannot call /api/dub/webhook; "
-            "jobs stay 'processing' forever. Set BACKEND_PUBLIC_URL=https://api.glotix.ai on worker-dubbing."
-        )
+        logger.error("BACKEND_PUBLIC_URL not set — Modal cannot call /api/dub/webhook")
         return ''
     url = f"{base}/api/dub/webhook/{job_id}"
     logger.info("Modal webhook URL for job %s: %s", job_id, url)
@@ -152,22 +149,18 @@ def _webhook_url(job_id: str) -> str:
 
 
 def trigger_modal(payload, timeout=30):
-    """Legacy alias — use shared.inference_provider.trigger_dubbing_job."""
     from shared.inference_provider import trigger_modal_dubbing
     return trigger_modal_dubbing(payload, timeout=timeout)
 
 
 def trigger_inference_dubbing(payload, timeout=30):
-    """Route dubbing to Modal."""
     from shared.inference_provider import trigger_modal_dubbing
-
     job_id = payload.get("job_id")
     logger.info("📤 Modal dub job %s", job_id)
     return trigger_modal_dubbing(payload, timeout=timeout)
 
 
 def call_backend(backend_url, payload, timeout=1500):
-    """Blocking backend call — RunPod polling only."""
     headers = {
         'Authorization': f'Bearer {config.RUNPOD_API_KEY}',
         'Content-Type':  'application/json'
@@ -191,9 +184,9 @@ def call_backend(backend_url, payload, timeout=1500):
 
 
 # ══════════════════════════════════════════
-# Main Task
+# Main Task (🔧 تم تعيين max_retries=0 لحماية الحساب)
 # ══════════════════════════════════════════
-@celery_app.task(name='tasks_dubbing.process_dub', bind=True, max_retries=2)
+@celery_app.task(name='tasks_dubbing.process_dub', bind=True, max_retries=0)
 def process_dub(self, job_id, user_id, file_key, lang, voice_config=None, return_video=True, **kwargs):
     with flask_app.app_context():
         job = DubbingJob.query.get(job_id)
@@ -279,13 +272,14 @@ def process_dub(self, job_id, user_id, file_key, lang, voice_config=None, return
             return
 
         except Exception as e:
-            logger.error(f"❌ Job {job_id} failed: {e}")
+            # 🔧 تم إلغاء الـ raise self.retry بالكامل لقتل الخطأ فوراً وحفظ المال
+            logger.error(f"❌ Job {job_id} failed permanently: {e}")
             job.status = 'failed'
             job.error  = str(e)
             db.session.commit()
-            if self.request.retries >= self.max_retries:
-                publish_job_status(
-                    job_id,
-                    {"status": "failed", "error": str(e)},
-                )
-            raise self.retry(exc=e, countdown=60)
+            
+            publish_job_status(
+                job_id,
+                {"status": "failed", "error": str(e)},
+            )
+            # تم حذف سطر الـ Retry من هنا تماماً لضمان عدم تكرار النزيف
