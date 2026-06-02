@@ -1,285 +1,58 @@
-# tasks_dubbing.py — V5.1 Production (Strict No-Retry / Anti-Drain Patch)
-import os
-import time
+# tasks_dubbing.py — Celery dubbing worker: R2 → RunPod or Modal
 import logging
-import requests
-from datetime import datetime
-from shared import config, r2_client, routing
-from shared.celery_setup import make_celery_app, QUEUE_DUBBING
-from shared.job_events import publish_job_status
-from shared.models import db, DubbingJob
-
-logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s: %(message)s')
-logger = logging.getLogger(__name__)
-
-celery_app = make_celery_app('tasks-dubbing', queue_name=QUEUE_DUBBING)
 
 from flask import Flask
+
+from shared import config
+from shared.celery_setup import QUEUE_DUBBING, make_celery_app
+from shared.dub_worker_submit import fail_dub_job_permanently, run_dub_worker_pipeline
+from shared.job_events import publish_job_status
+from shared.models import DubbingJob, db
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
+logger = logging.getLogger(__name__)
+
+celery_app = make_celery_app("tasks-dubbing", queue_name=QUEUE_DUBBING)
+
 flask_app = Flask(__name__)
-flask_app.config['SQLALCHEMY_DATABASE_URI'] = config.DATABASE_URL.replace('postgres://', 'postgresql://', 1)
-flask_app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+flask_app.config["SQLALCHEMY_DATABASE_URI"] = config.DATABASE_URL.replace(
+    "postgres://", "postgresql://", 1,
+)
+flask_app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 db.init_app(flask_app)
 
-# ══════════════════════════════════════════
-# Supabase Helpers
-# ══════════════════════════════════════════
-def _supa_headers():
-    return {
-        "apikey":         os.environ.get('SUPABASE_SERVICE_KEY', ''),
-        "Authorization": f"Bearer {os.environ.get('SUPABASE_SERVICE_KEY', '')}",
-        "Content-Type":  "application/json"
-    }
 
-def get_user_info(user_id: str) -> dict:
-    try:
-        url = os.environ.get('SUPABASE_URL', '')
-        if not url or user_id == 'default_user':
-            return {}
-        res = requests.get(
-            f"{url}/rest/v1/user_quotas?user_id=eq.{user_id}&select=*",
-            headers=_supa_headers(), timeout=10
-        )
-        if res.ok and res.json():
-            return res.json()[0]
-    except Exception as e:
-        logger.warning(f"⚠️ get_user_info failed: {e}")
-    return {}
-
-
-def update_dub_usage(user_id: str, seconds_used: int) -> dict:
-    try:
-        url = os.environ.get('SUPABASE_URL', '')
-        if not url:
-            return {}
-        res = requests.post(
-            f"{url}/rest/v1/rpc/increment_dub_usage",
-            json={"p_user_id": user_id, "p_seconds": seconds_used},
-            headers={**_supa_headers(), "Prefer": "return=representation"},
-            timeout=10
-        )
-        if res.ok:
-            return res.json() or {}
-    except Exception as e:
-        logger.warning(f"⚠️ update_dub_usage failed: {e}")
-    return {}
-
-
-def notify_quota_if_needed(user_info: dict, quota: dict):
-    try:
-        from email_service import send_quota_warning, send_quota_exhausted
-
-        email   = user_info.get('email', '')
-        name    = user_info.get('name', 'User')
-        plan    = quota.get('plan', 'free')
-        user_id = quota.get('user_id', '')
-
-        if not email:
-            return
-
-        dub_used  = quota.get('dub_seconds_used', 0)
-        dub_limit = quota.get('dub_seconds_limit', 1)
-        tts_used  = quota.get('tts_chars_used', 0)
-        tts_limit = quota.get('tts_chars_limit', 1)
-        stt_used  = quota.get('stt_minutes_used', 0)
-        stt_limit = quota.get('stt_minutes_limit', 1)
-        dub_pct   = dub_used / dub_limit * 100 if dub_limit else 0
-
-        reset_date = quota.get('reset_date', 'next month')
-        try:
-            reset_date = datetime.fromisoformat(
-                str(reset_date).replace('Z', '')
-            ).strftime("%b %d, %Y")
-        except:
-            pass
-
-        if dub_pct >= 100:
-            send_quota_exhausted(email, name, plan, reset_date)
-            logger.info(f"📧 Quota exhausted → {email}")
-
-        elif dub_pct >= 80 and not quota.get('warned_80'):
-            send_quota_warning(
-                email, name,
-                tts_used, tts_limit,
-                dub_used, dub_limit,
-                stt_used, stt_limit,
-                plan
-            )
-            logger.info(f"📧 Quota 80% warning → {email}")
-            try:
-                supa_url = os.environ.get('SUPABASE_URL', '')
-                requests.patch(
-                    f"{supa_url}/rest/v1/user_quotas?user_id=eq.{user_id}",
-                    json={"warned_80": True},
-                    headers=_supa_headers(), timeout=5
-                )
-            except:
-                pass
-
-    except Exception as e:
-        logger.error(f"❌ notify_quota error: {e}")
-
-
-# ══════════════════════════════════════════
-# Backend Call (Modal / RunPod)
-# ══════════════════════════════════════════
-def _get_modal_base_url():
-    modal_url = (os.environ.get("MODAL_DUBBING_URL") or "").strip()
-    if not modal_url:
-        raise ValueError("MODAL_DUBBING_URL environment variable is not set")
-    return modal_url.rstrip("/")
-
-
-def _is_runpod(backend_url: str) -> bool:
-    return 'runpod.ai' in backend_url or 'runpod.io' in backend_url
-
-
-def _webhook_url(job_id: str) -> str:
-    base = (
-        os.environ.get('BACKEND_PUBLIC_URL')
-        or os.environ.get('PUBLIC_API_URL')
-        or os.environ.get('API_BASE_URL')
-        or 'https://api.glotix.ai'
-    ).strip().rstrip('/')
-    if not base:
-        logger.error("BACKEND_PUBLIC_URL not set — Modal cannot call /api/dub/webhook")
-        return ''
-    url = f"{base}/api/dub/webhook/{job_id}"
-    logger.info("Modal webhook URL for job %s: %s", job_id, url)
-    return url
-
-
-def trigger_modal(payload, timeout=30):
-    from shared.inference_provider import trigger_modal_dubbing
-    return trigger_modal_dubbing(payload, timeout=timeout)
-
-
-def trigger_inference_dubbing(payload, timeout=30):
-    from shared.inference_provider import trigger_modal_dubbing
-    job_id = payload.get("job_id")
-    logger.info("📤 Modal dub job %s", job_id)
-    return trigger_modal_dubbing(payload, timeout=timeout)
-
-
-def call_backend(backend_url, payload, timeout=1500):
-    headers = {
-        'Authorization': f'Bearer {config.RUNPOD_API_KEY}',
-        'Content-Type':  'application/json'
-    }
-    r = requests.post(
-        f"{backend_url.rstrip('/')}/run",
-        json={'input': payload}, headers=headers, timeout=60
-    )
-    r.raise_for_status()
-    runpod_job_id = r.json().get('id')
-    while True:
-        status_data = requests.get(
-            f"{backend_url.rstrip('/')}/status/{runpod_job_id}",
-            headers=headers, timeout=30
-        ).json()
-        if status_data.get('status') == 'COMPLETED':
-            return status_data.get('output')
-        if status_data.get('status') in ['FAILED', 'CANCELLED']:
-            raise Exception(f"RunPod failed: {status_data.get('error')}")
-        time.sleep(5)
-
-
-# ══════════════════════════════════════════
-# Main Task (🔧 تم تعيين max_retries=0 لحماية الحساب)
-# ══════════════════════════════════════════
-@celery_app.task(name='tasks_dubbing.process_dub', bind=True, max_retries=0)
-def process_dub(self, job_id, user_id, file_key, lang, voice_config=None, return_video=True, **kwargs):
+@celery_app.task(name="tasks_dubbing.process_dub", bind=True, max_retries=0)
+def process_dub(
+    self,
+    job_id,
+    user_id,
+    file_key,
+    lang,
+    voice_config=None,
+    return_video=True,
+    **kwargs,
+):
     with flask_app.app_context():
         job = DubbingJob.query.get(job_id)
         if not job:
-            logger.error(f"Job {job_id} not found")
+            logger.error("Job %s not found", job_id)
             return
 
-        job.status = 'processing'
+        job.status = "processing"
         db.session.commit()
         publish_job_status(job_id, {"status": "processing"})
 
         try:
-            # 1. Generate download URL from R2
-            media_url = r2_client.generate_download_url(file_key)
-            if not media_url:
-                raise Exception("Failed to generate media_url from R2")
-
-            from shared.inference_provider import trigger_modal_dubbing
-
-            voice_source = voice_config.get('source', 'original') if voice_config else 'original'
-            sample_file  = voice_config.get('file') if voice_config else None
-            source_language = (kwargs.get('source_language') or '').strip()
-
-            backend_url = routing.get_dubbing_url()
-            if not _is_runpod(backend_url):
-                backend_url = _get_modal_base_url()
-
-            payload = {
-                'job_id':          job_id,
-                'backend_job_id':  job_id,
-                'client_job_id':   job_id,
-                'media_url':       media_url,
-                'lang':            lang,
-                'voice_source':    voice_source,
-                'sample_file':     sample_file,
-                'engine':          kwargs.get('engine', 'xtts'),
-                'return_video':    return_video,
-            }
-            if source_language:
-                payload['source_language'] = source_language
-            callback = _webhook_url(job_id)
-            if callback:
-                payload['webhook_url'] = callback
-                payload['callback_url'] = callback
-
-            if _is_runpod(backend_url):
-                data = call_backend(backend_url, payload)
-                final_url        = data.get('output_url') or data.get('audio_url') or data.get('video_url')
-                duration_seconds = int(data.get('duration_seconds', 0))
-                if not final_url:
-                    raise Exception("Backend did not return output URL")
-
-                job.status     = 'completed'
-                job.output_url = final_url
-                db.session.commit()
-                publish_job_status(
-                    job_id,
-                    {"status": "completed", "output_url": final_url},
-                )
-                logger.info(f"✅ Job {job_id} completed — {duration_seconds}s")
-
-                if duration_seconds > 0 and user_id and user_id != 'default_user':
-                    user_info     = get_user_info(user_id)
-                    updated_quota = update_dub_usage(user_id, duration_seconds)
-                    if user_info and updated_quota:
-                        notify_quota_if_needed(user_info, updated_quota)
-            else:
-                from shared.modal_job_map import (
-                    extract_modal_ids_from_response,
-                    link_modal_to_backend,
-                )
-
-                modal_resp = trigger_modal_dubbing(payload)
-                for ext_id in extract_modal_ids_from_response(modal_resp):
-                    if ext_id != job_id:
-                        link_modal_to_backend(ext_id, job_id)
-                logger.info(
-                    "⏳ Job %s submitted to Modal (resp=%s) — await webhook %s",
-                    job_id,
-                    modal_resp,
-                    callback or "(none)",
-                )
-            return
-
-        except Exception as e:
-            # 🔧 تم إلغاء الـ raise self.retry بالكامل لقتل الخطأ فوراً وحفظ المال
-            logger.error(f"❌ Job {job_id} failed permanently: {e}")
-            job.status = 'failed'
-            job.error  = str(e)
-            db.session.commit()
-            
-            publish_job_status(
+            run_dub_worker_pipeline(
+                job,
                 job_id,
-                {"status": "failed", "error": str(e)},
+                user_id,
+                file_key,
+                lang,
+                voice_config,
+                return_video,
+                **kwargs,
             )
-            # تم حذف سطر الـ Retry من هنا تماماً لضمان عدم تكرار النزيف
+        except Exception as exc:
+            fail_dub_job_permanently(job, job_id, exc)
