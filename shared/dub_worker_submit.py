@@ -159,6 +159,17 @@ def submit_dub_to_modal(job_id: str, payload: dict) -> None:
     for ext_id in extract_modal_ids_from_response(modal_resp):
         if ext_id != job_id:
             link_modal_to_backend(ext_id, job_id)
+
+    if isinstance(modal_resp, dict) and modal_resp.get("spawned_unconfirmed"):
+        publish_job_status(
+            job_id,
+            {
+                "status": "processing",
+                "stage": "waiting",
+                "message": "Modal is starting (cold start) — result will arrive via webhook",
+            },
+        )
+
     callback = payload.get("webhook_url") or ""
     logger.info(
         "Job %s submitted to Modal (resp=%s) — await webhook %s",
