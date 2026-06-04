@@ -73,6 +73,14 @@ def build_runpod_or_modal_payload(
                 logger.exception("get_saved_voice failed for job %s", job_id)
 
     resolved_sample = sample_file or saved_voice_url or (vc.get("sample_url") or "").strip()
+    if resolved_sample:
+        vc["sample_url"] = resolved_sample
+        vc["sample_file"] = resolved_sample
+
+    sample_text = (kwargs.get("sample_text") or vc.get("sample_text") or "").strip()
+    if sample_text:
+        vc["sample_text"] = sample_text
+
     engine = (
         kwargs.get("force_engine")
         or kwargs.get("engine")
@@ -81,8 +89,9 @@ def build_runpod_or_modal_payload(
     ).strip()
     if not engine and resolved_sample:
         engine = "xtts"
-    if not engine:
-        engine = "xtts"
+
+    user_id = (kwargs.get("user_id") or "").strip()
+    clone_source = (kwargs.get("clone_source") or vc.get("clone_source") or "").strip().lower()
 
     if not return_video:
         return_video = bool(vc.get("video_output", kwargs.get("return_video", True)))
@@ -91,14 +100,19 @@ def build_runpod_or_modal_payload(
         "job_id": job_id,
         "backend_job_id": job_id,
         "client_job_id": job_id,
+        "user_id": user_id,
         "media_url": media_url,
         "lang": lang,
         "target_language": lang,
+        "target_lang": lang,
+        "voice_config": vc,
         "voice_mode": voice_mode,
         "voice_source": voice_mode,
+        "clone_source": clone_source,
         "sample_url": resolved_sample,
-        "sample_file": resolved_sample,
+        "sample_file": resolved_sample or sample_file,
         "saved_voice_url": saved_voice_url,
+        "skip_vocal_separation": bool(saved_voice_url),
         "engine": engine,
         "force_engine": engine,
         "return_video": return_video,
@@ -110,6 +124,8 @@ def build_runpod_or_modal_payload(
     dialect = (vc.get("dialect") or kwargs.get("dialect") or "").strip()
     if dialect:
         payload["dialect"] = dialect
+        vc["dialect"] = dialect
+        payload["voice_config"] = vc
     callback = build_modal_dub_webhook_url(job_id)
     if callback:
         payload["webhook_url"] = callback

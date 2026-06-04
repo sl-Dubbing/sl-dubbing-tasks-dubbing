@@ -55,9 +55,14 @@ def _normalize_modal_dub_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     if sample:
         p["sample_url"] = sample
+        p["sample_file"] = sample
         if not (vc.get("sample_url") or vc.get("sample_file") or "").strip():
             vc["sample_url"] = sample
             vc["sample_file"] = sample
+
+    sample_text = (p.get("sample_text") or vc.get("sample_text") or "").strip()
+    if sample_text:
+        vc["sample_text"] = sample_text
 
     p["voice_config"] = vc
     return p
