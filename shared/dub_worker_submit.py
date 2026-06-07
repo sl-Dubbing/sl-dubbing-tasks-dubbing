@@ -96,6 +96,12 @@ def build_runpod_or_modal_payload(
     if not return_video:
         return_video = bool(vc.get("video_output", kwargs.get("return_video", True)))
 
+    sample_source_url = (
+        kwargs.get("sample_source_url")
+        or vc.get("sample_source_url")
+        or ""
+    ).strip()
+
     payload: Dict[str, Any] = {
         "job_id": job_id,
         "backend_job_id": job_id,
@@ -110,6 +116,7 @@ def build_runpod_or_modal_payload(
         "voice_source": voice_mode,
         "clone_source": clone_source,
         "sample_url": resolved_sample,
+        "sample_source_url": sample_source_url or resolved_sample,
         "sample_file": resolved_sample or sample_file,
         "saved_voice_url": saved_voice_url,
         "skip_vocal_separation": bool(saved_voice_url),
@@ -118,14 +125,22 @@ def build_runpod_or_modal_payload(
         "return_video": return_video,
         "quality": kwargs.get("quality") or vc.get("quality") or "",
     }
-    source_language = (kwargs.get("source_language") or "").strip()
+    source_language = (kwargs.get("source_language") or vc.get("source_language") or "").strip()
     if source_language:
         payload["source_language"] = source_language
+        vc["source_language"] = source_language
+    source_dialect = (kwargs.get("source_dialect") or vc.get("source_dialect") or "").strip()
+    if source_dialect:
+        payload["source_dialect"] = source_dialect
+        vc["source_dialect"] = source_dialect
     dialect = (vc.get("dialect") or kwargs.get("dialect") or "").strip()
     if dialect:
         payload["dialect"] = dialect
         vc["dialect"] = dialect
-        payload["voice_config"] = vc
+    if kwargs.get("translate") is False or vc.get("translate") is False:
+        payload["translate"] = False
+        vc["translate"] = False
+    payload["voice_config"] = vc
     callback = build_modal_dub_webhook_url(job_id)
     if callback:
         payload["webhook_url"] = callback
