@@ -81,14 +81,18 @@ def build_runpod_or_modal_payload(
     if sample_text:
         vc["sample_text"] = sample_text
 
-    engine = (
-        kwargs.get("force_engine")
-        or kwargs.get("engine")
-        or vc.get("force_engine")
-        or ""
-    ).strip()
-    if not engine and resolved_sample:
-        engine = "xtts"
+    from shared.dub_engine_policy import (
+        apply_high_quality_voice_defaults,
+        attach_engine_fields,
+        resolve_dub_force_engine,
+        resolve_dub_quality,
+    )
+
+    vc = apply_high_quality_voice_defaults(
+        vc,
+        quality=resolve_dub_quality(body=kwargs, voice_config=vc),
+    )
+    forced_engine = resolve_dub_force_engine(body=kwargs, voice_config=vc)
 
     user_id = (kwargs.get("user_id") or "").strip()
     clone_source = (kwargs.get("clone_source") or vc.get("clone_source") or "").strip().lower()
@@ -114,17 +118,23 @@ def build_runpod_or_modal_payload(
         "voice_config": vc,
         "voice_mode": voice_mode,
         "voice_source": voice_mode,
-        "clone_source": clone_source,
+        "clone_source": clone_source or vc.get("clone_source") or "",
         "sample_url": resolved_sample,
         "sample_source_url": sample_source_url or resolved_sample,
         "sample_file": resolved_sample or sample_file,
         "saved_voice_url": saved_voice_url,
-        "skip_vocal_separation": bool(saved_voice_url),
-        "engine": engine,
-        "force_engine": engine,
         "return_video": return_video,
-        "quality": kwargs.get("quality") or vc.get("quality") or "",
+        "quality": vc.get("quality") or resolve_dub_quality(body=kwargs, voice_config=vc),
     }
+    payload = attach_engine_fields(payload, forced_engine)
+    logger.info(
+        "modal payload job=%s lang=%s clone_source=%s force_engine=%s ref_text_len=%d",
+        job_id,
+        lang,
+        payload.get("clone_source") or "-",
+        forced_engine or "auto-chain",
+        len((vc.get("sample_text") or "")),
+    )
     source_language = (kwargs.get("source_language") or vc.get("source_language") or "").strip()
     if source_language:
         payload["source_language"] = source_language
