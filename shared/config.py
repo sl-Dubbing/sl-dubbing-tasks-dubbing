@@ -43,6 +43,9 @@ ACTIVE_INFERENCE_PROVIDER = (
 ).strip().lower()
 MODAL_TOKEN_SECRET = os.environ.get('MODAL_TOKEN_SECRET', '')
 
+# Execution mode: 'local' = RTX 3060 via local_server.py, 'cloud' = Modal/RunPod (default)
+EXECUTION_MODE = (os.environ.get('EXECUTION_MODE') or 'cloud').strip().lower()
+
 # Pricing & Credits
 WELCOME_CREDITS = int(os.environ.get('WELCOME_CREDITS', '1000'))
 DUB_COST = int(os.environ.get('DUB_COST', '100'))
