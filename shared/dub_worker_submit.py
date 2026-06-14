@@ -257,7 +257,7 @@ def run_dub_worker_pipeline(
     )
 
     # ── Local mode: bypass Modal/RunPod and call the local GPU server ──────
-    if config.EXECUTION_MODE == "local":
+    if (os.environ.get("EXECUTION_MODE") or "cloud").strip().lower() == "local":
         submit_dub_to_local(job, job_id, user_id, payload)
         return
 
