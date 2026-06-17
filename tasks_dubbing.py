@@ -1,4 +1,7 @@
 # tasks_dubbing.py — Celery dubbing worker: R2 → RunPod or Modal
+import os
+os.environ["SPEAKER_EMB_CACHE_DISABLED"] = "1"
+os.environ["TORCHAUDIO_USE_TORCHCODEC"] = "0"
 import logging
 
 from flask import Flask
