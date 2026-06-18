@@ -1,5 +1,7 @@
 # sl-dubbing-tasks-dubbing-main — Celery Worker الدبلجة (REPOSITORY)
 
+> **فهرس المشروع:** [PROJECT_MAP.md](../../PROJECT_MAP.md) · [BACKEND.md](../../BACKEND.md)
+
 > يستقبل مهام الدبلجة من Redis queue وينفّذها عبر Modal GPU أو RunPod.
 > يعمل على **Railway** بدون GPU — الـ GPU يكون في Modal.
 
