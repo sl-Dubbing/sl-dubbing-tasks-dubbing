@@ -227,7 +227,14 @@ def submit_dub_to_local(job: DubbingJob, job_id: str, user_id: str, payload: dic
     local_url = (os.environ.get("LOCAL_PROCESSING_URL") or "").strip().rstrip("/")
     if not local_url:
         raise ValueError("LOCAL_PROCESSING_URL must be set when EXECUTION_MODE=local")
-    resp = _req.post(f"{local_url}/upload-from-url", json=payload, timeout=60)
+    from shared.security import inference_request_headers
+
+    resp = _req.post(
+        f"{local_url}/upload-from-url",
+        json=payload,
+        headers=inference_request_headers(),
+        timeout=60,
+    )
     resp.raise_for_status()
     publish_job_status(
         job_id,
