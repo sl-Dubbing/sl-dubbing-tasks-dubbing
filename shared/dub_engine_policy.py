@@ -7,9 +7,11 @@ _ENGINE_ALIASES = {
     "cosy": "cosyvoice",
     "cosyvoice2": "cosyvoice",
     "cosy-voice": "cosyvoice",
-    "xtts_v2": "xtts",
-    "xtts-v2": "xtts",
-    "xtts2": "xtts",
+    "xtts_v2": "chatterbox",
+    "xtts-v2": "chatterbox",
+    "xtts2": "chatterbox",
+    "xtts": "chatterbox",
+    "chatterbox-tts": "chatterbox",
 }
 
 DEFAULT_DUB_QUALITY = "studio"
