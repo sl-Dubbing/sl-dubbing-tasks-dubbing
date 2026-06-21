@@ -630,8 +630,17 @@ def run_dub_worker_pipeline(
     # # block — تنفيذ منطق — راجع الأسطر التالية
     # # guard — رفض/خروج
     if (os.environ.get("EXECUTION_MODE") or "cloud").strip().lower() == "local":
-        submit_dub_to_local(job, job_id, user_id, payload)
-        # # block — فرع شرطي
+        from shared import config as _cfg
+
+        local_url = (_cfg.LOCAL_PROCESSING_URL or os.environ.get("LOCAL_PROCESSING_URL") or "").strip()
+        if local_url and routing._is_alive(local_url):
+            submit_dub_to_local(job, job_id, user_id, payload)
+            return
+        logger.warning(
+            "Local PC unreachable (EXECUTION_MODE=local, url=%s) — falling back to Modal",
+            local_url or "(unset)",
+        )
+        submit_dub_to_modal(job_id, payload)
         return
 
     # ── Cloud mode: existing Modal / RunPod routing ─────────────────────────
