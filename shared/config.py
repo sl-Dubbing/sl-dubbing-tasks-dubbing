@@ -7,6 +7,14 @@
 # # KW عام,general
 # # CONVENTION — FN/AR/KW + # block كل ~6 أسطر — FUNCTION_INDEX.md DOMAIN_INDEX.md
 # # FILE backend/sl-dubbing-tasks-dubbing-main/shared/config.py
+# # AR Celery workers
+# # KW عام,general
+# # CONVENTION — FN/AR/KW + # block كل ~6 أسطر — FUNCTION_INDEX.md DOMAIN_INDEX.md
+# # FILE backend/sl-dubbing-tasks-dubbing-main/shared/config.py
+# # AR Celery workers
+# # KW عام,general
+# # CONVENTION — FN/AR/KW + # block كل ~6 أسطر — FUNCTION_INDEX.md DOMAIN_INDEX.md
+# # FILE backend/sl-dubbing-tasks-dubbing-main/shared/config.py
 # # AR وحدة الدبلجة — رفع، بدء مهمة، polling، أصوات
 # # CONVENTION — # FN / # AR فوق كل دالة، # قبل كل خطوة — see FUNCTION_INDEX.md
 # shared/config.py — Unified V3.0 (All Microservices)
@@ -83,6 +91,12 @@ ADMIN_SECRET = os.environ.get('ADMIN_SECRET', 'change-me')
 # # FN is_video_file
 # # AR دالة is_video_file (is_video_file)
 # # KW عام,general
+# # FN is_video_file
+# # AR دالة is_video_file (is_video_file)
+# # KW عام,general
+# # FN is_video_file
+# # AR دالة is_video_file (is_video_file)
+# # KW عام,general
 def is_video_file(filename):
     if not filename: return False
     ext = filename.rsplit('.', 1)[-1].lower() if '.' in filename else ''
@@ -92,13 +106,26 @@ def is_video_file(filename):
 # # FN is_audio_file
 # # block — إرجاع نتيجة
 # # block — إرجاع نتيجة
+# # block — إرجاع نتيجة
+# # block — إرجاع نتيجة
 # # AR هل audio file (is_audio_file)
 # # FN is_audio_file
 # # AR دالة is_audio_file (is_audio_file)
+# # block — تنفيذ منطق — راجع الأسطر التالية
 # # KW عام,general
+# # block — تنفيذ منطق — راجع الأسطر التالية
 # # FN is_audio_file
 # # block — تنفيذ منطق — راجع الأسطر التالية
 # # AR دالة is_audio_file (is_audio_file)
+# # KW عام,general
+# # block — تنفيذ منطق — راجع الأسطر التالية
+# # FN is_audio_file
+# # AR دالة is_audio_file (is_audio_file)
+# # block — تنفيذ منطق — راجع الأسطر التالية
+# # KW عام,general
+# # FN is_audio_file
+# # AR دالة is_audio_file (is_audio_file)
+# # block — تنفيذ منطق — راجع الأسطر التالية
 # # KW عام,general
 def is_audio_file(filename):
     if not filename: return False
@@ -109,13 +136,26 @@ def is_audio_file(filename):
 # # FN get_file_extension
 # # block — إرجاع نتيجة
 # # block — إرجاع نتيجة
+# # block — إرجاع نتيجة
+# # block — إرجاع نتيجة
 # # AR جلب file extension (get_file_extension)
 # # FN get_file_extension
 # # AR دالة get_file_extension (get_file_extension)
+# # block — تنفيذ منطق — راجع الأسطر التالية
 # # KW عام,general
+# # block — تنفيذ منطق — راجع الأسطر التالية
 # # FN get_file_extension
 # # block — تنفيذ منطق — راجع الأسطر التالية
 # # AR دالة get_file_extension (get_file_extension)
+# # KW عام,general
+# # block — تنفيذ منطق — راجع الأسطر التالية
+# # FN get_file_extension
+# # AR دالة get_file_extension (get_file_extension)
+# # block — تنفيذ منطق — راجع الأسطر التالية
+# # KW عام,general
+# # FN get_file_extension
+# # AR دالة get_file_extension (get_file_extension)
+# # block — تنفيذ منطق — راجع الأسطر التالية
 # # KW عام,general
 def get_file_extension(url_or_path):
     if not url_or_path: return ''
@@ -126,12 +166,23 @@ def get_file_extension(url_or_path):
 # # AR هل video url (is_video_url)
 # # block — إرجاع نتيجة
 # # block — إرجاع نتيجة
+# # block — إرجاع نتيجة
+# # block — إرجاع نتيجة
 # # FN is_video_url
+# # AR دالة is_video_url (is_video_url)
+# # KW عام,general
+# # block — تنفيذ منطق — راجع الأسطر التالية
+# # FN is_video_url
+# # block — تنفيذ منطق — راجع الأسطر التالية
+# # AR دالة is_video_url (is_video_url)
+# # block — تنفيذ منطق — راجع الأسطر التالية
+# # KW عام,general
+# # FN is_video_url
+# # block — تنفيذ منطق — راجع الأسطر التالية
 # # AR دالة is_video_url (is_video_url)
 # # KW عام,general
 # # FN is_video_url
 # # AR دالة is_video_url (is_video_url)
-# # block — تنفيذ منطق — راجع الأسطر التالية
 # # KW عام,general
 def is_video_url(url):
     return get_file_extension(url) in ALLOWED_EXTENSIONS['video']
